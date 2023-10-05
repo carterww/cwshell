@@ -14,6 +14,7 @@ typedef struct process {
   int status;                 /* reported status value */
 } process;
 
+process *init_process(process *p, process *next);
 
 /* A job is a pipeline of processes.  */
 typedef struct job {

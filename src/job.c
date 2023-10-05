@@ -1,4 +1,14 @@
 #include "../include/job.h"
+#include <stdlib.h>
+
+process *init_process(process *p, process *next) {
+    p->argv = NULL;
+    p->next = next;
+    p->completed = 0;
+    p->stopped = 0;
+    p->status = 0;
+    return p;
+}
 
 job *job_find(job *head, pid_t pgid) {
     for (job *j = head; j; j = j->next)

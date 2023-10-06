@@ -1,3 +1,6 @@
+#include <asm-generic/errno-base.h>
+#include <errno.h>
+#include <stddef.h>
 #include <string.h>
 #include <signal.h>
 #include <stdio.h>
@@ -19,14 +22,48 @@ struct termios shell_tmodes;
 int shell_terminal;
 int shell_is_interactive;
 
-/* This is a list of current commands that are running
- * in the shell. Each index contains a pointer to a process
- * struct. The process is a head of a linked list of processes
- * that were executed in the same command.
- * NOTE: I will need to change this, it is too simple.
- */
-process processes[MAX_COMMAND_COUNT];
-int process_count = 0;
+char background_process_buffer[INPUT_LENGTH];
+
+static process *head = NULL;
+
+void sigchld_hanlder(int n) {
+    if (head == NULL)
+        return;
+    process *p = head, *tmp = NULL;
+    while (p) {
+        if (p->foreground) {
+            p = p->next;
+            continue;
+        }
+        pid_t wait_result = waitpid(p->pid, &(p->status), WNOHANG);
+        if (wait_result == 0) {
+            p = p->next;
+            continue;
+        } else if (wait_result == -1) {
+            perror("waitpid");
+            exit(1);
+        } else {
+            tmp = p;
+            char msg[64];
+            if (WIFEXITED(p->status)) {
+                sprintf(msg, "%s exited with status %d\n", p->argv[0], WEXITSTATUS(p->status));
+            } else {
+                sprintf(msg, "%s exited abnormally\n", p->argv[0]);
+            }
+            /* If we don't have the terminal then don't print to it
+             * simply add it to the buffer.
+             */
+            size_t left = INPUT_LENGTH - strlen(background_process_buffer) - 1;
+            strncat(background_process_buffer, msg, left);
+            p = p->next;
+            /* Free completed process */
+            remove_process(&head, tmp->pid);
+            free_process(tmp);
+            free(tmp);
+            tmp = NULL;
+        }
+    }
+}
 
 /* Initializes the shell by ensuring the shell is the
  * foreground process group of terminal. If so, it puts shell
@@ -56,7 +93,8 @@ void init_shell() {
         signal(SIGTSTP, SIG_IGN);
         signal(SIGTTIN, SIG_IGN);
         signal(SIGTTOU, SIG_IGN);
-        signal(SIGCHLD, SIG_IGN);
+        /* So we get notified when a child process exits */
+        signal(SIGCHLD, sigchld_hanlder);
 
         /* Put shell in its own process group. */
         shell_pgid = getpid();
@@ -71,11 +109,10 @@ void init_shell() {
 
         /* Save default terminal attributes for shell.  */
         tcgetattr(shell_terminal, &shell_tmodes);
-        printf("Shell initialized.\n");
     }
 }
 
-void launch_process(process *p, pid_t pgid, int infile, int outfile, int errfile, int foreground) {
+void execute_process(process *p) {
     pid_t pid;
 
     /* If shell isn't in foreground, then we can't
@@ -83,10 +120,9 @@ void launch_process(process *p, pid_t pgid, int infile, int outfile, int errfile
      */
     if (shell_is_interactive) {
         pid = getpid();
-        if (pgid == 0) pgid = pid;
-        if (foreground) {
+        if (p->foreground) {
             /* Set this process as the foreground process group for the terminal. */
-            tcsetpgrp(shell_terminal, pgid);
+            tcsetpgrp(shell_terminal, pid);
         }
 
         /* Children inherit the signal handlers of parent which
@@ -100,141 +136,148 @@ void launch_process(process *p, pid_t pgid, int infile, int outfile, int errfile
         signal(SIGCHLD, SIG_DFL);
     }
 
-    /* Set the process stdin, stdout, and stderr to the specified file descriptors.
-     * if necessary.
-     */
-    if (infile != STDIN_FILENO) {
-        /* Make infile the standard input file descriptor.
-         * old STDIN_FILENO is closed.
-         */
-        dup2(infile, STDIN_FILENO);
-        close(infile);
-    }
-    if (outfile != STDOUT_FILENO) {
-        /* Make outfile the standard output file descriptor.
-         * old STDOUT_FILENO is closed.
-         */
-        dup2(outfile, STDOUT_FILENO);
-        close(outfile);
-    }
-    if (errfile != STDERR_FILENO) {
-        /* Make errfile the standard error file descriptor.
-         * old STDERR_FILENO is closed.
-         */
-        dup2(errfile, STDERR_FILENO);
-        close(errfile);
-    }
-    /* After managing file descriptors, signals, and process groups,
-     * execute the command.
-     */
     execvp(p->argv[0], p->argv); /* execvp will search PATH for the command. */
     perror("execvp");
     exit(1);
 }
 
-void execute_command(process *head) {
-    int i = 0;
-    int foreground = 1;
-    while (head->argv[i] != NULL && i < 100) {
-        i++;
-        printf("%s\n", head->argv[i - 1]);
-
-    }
-    if (strcmp(head->argv[i - 1], "&") == 0) {
-        head->argv[i - 1] = NULL;
-        foreground = 0;
-    }
-    processes[process_count++] = *head;
-
-    pid_t pid;
-    pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        exit(1);
-    } else if (pid > 0) {
-        /* Parent */
-        head->pid = pid;
-        printf("%d\n", foreground);
-        if (foreground) {
-            /* Wait for the child to finish */
-            waitpid(pid, NULL, 0);
-            /* Put the shell back in the foreground */
-            tcsetpgrp(shell_terminal, shell_pgid);
+void launch_processes(process *local_head) {
+    if (local_head == NULL)
+        return;
+    process *p = local_head, *tmp = NULL;
+    while (p) {
+        pid_t pid;
+        pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            exit(1);
+        } else if (pid > 0) {
+            /* Parent */
+            p->pid = pid;
+            /* Put the child in its own process group */
+            setpgid(pid, pid);
+            if (p->foreground) {
+                /* Wait for the child to finish */
+                waitpid(pid, &(p->status), 0);
+                p->completed = 1;
+                /* Put the shell back in the foreground */
+                tcsetpgrp(shell_terminal, shell_pgid);
+                /* Set these in case process adjusted them */
+                tcsetattr(shell_terminal, TCSANOW, &shell_tmodes);
+            } else {
+                printf("%s [%d]\n", p->argv[0], pid);
+                /* Add the process to the list of processes */
+                if (head != NULL) {
+                    add_process(&head, p);
+                } else {
+                    head = p;
+                }
+            }
+        } else {
+            /* Child */
+            execute_process(p);
         }
-    } else {
-        /* Child */
-        launch_process(head, 0, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, foreground);
+        if (p->completed) {
+            tmp = p;
+            WIFEXITED(p->status) ? 
+                printf("%s exited with status %d\n", p->argv[0], WEXITSTATUS(p->status)) : 
+                printf("%s exited abnormally\n", p->argv[0]);
+        }
+        p = p->next;
+        /* Free completed process */
+        if (tmp != NULL) {
+            free_process(tmp);
+            free(tmp);
+            tmp = NULL;
+        }
     }
-    return;
-
 }
 
-void handle_command(int argc, char *argv[]) {
-    /* Main leaves argv[argc] empty so we can place null there.
-     * to indicate the end of args for exec
-     */
-    argv[argc] = NULL;
-    char *token;
-    char *tokens[MAX_TOKENS];
-    int i = 0;
-    int j = 0;
-    /* This will be the current process we are working with */
-    process *curr_process = malloc(sizeof(process));
-    process *prev_process = NULL;
-    process *head = curr_process;
+void handle_input(char **tokens, int token_count) {
+    process *local_head = NULL;
+    process *p = malloc(sizeof(process));
+    init_process(p);
+    p->argv = malloc(sizeof(char *) * (token_count + 1));
 
-    memset(tokens, 0, MAX_TOKENS * sizeof(char *));
+    char ended_on_symbol = 0;
+    int i = 0, j = 0;
+    do {
+        /* strtok does not alloc memory, so we need to do it ourselves
+         * to make sure the memory is still valid after the next main
+         * loop iteration.
+         */
+        if (strcmp("&", tokens[i]) == 0) {
+            *p->argv = realloc(*p->argv, sizeof(char *) * (j + 1));
+            p->argv[j] = NULL;
+            p->foreground = 0;
+            ended_on_symbol |= 2;
+        } else if (strcmp(";", tokens[i]) == 0) {
+            /* Move all this to function since same as above */
+            *p->argv = realloc(*p->argv, sizeof(char *) * (j + 1));
+            p->argv[j] = NULL;
+            ended_on_symbol |= 2;
+        }
 
-    while ((token = argv[i++]) != NULL) {
-        if (strcmp("&", token) == 0) {
-            init_process(curr_process, prev_process); /* Initialize the values */
-            char **p_argv_perm = malloc(sizeof(char *) * (j + 2));
-            p_argv_perm[j + 1] = NULL;
-            p_argv_perm[j] = token;
-            for (int k = 0; k < j; k++) {
-                p_argv_perm[k] = tokens[k];
+        if (ended_on_symbol & 2) {
+            ended_on_symbol = 0;
+            if (local_head != NULL) {
+                add_process(&local_head, p);
+            } else {
+                local_head = p;
+            }       
+            if (i + 1 < token_count) {
+                p = malloc(sizeof(process));
+                init_process(p);
+                p->argv = malloc(sizeof(char *) * (token_count + 1));
+                j = 0;
+                i++;
+                continue;
+            } else {
+                ended_on_symbol = 1;
+                break;
             }
-            curr_process->argv = p_argv_perm;
-            memset(tokens, 0, MAX_TOKENS * sizeof(char *));
-            prev_process = curr_process;
-            j = 0;
-        } else {
-            tokens[j] = token;
-            j++;
         }
-    }
 
-    /* Initialize the last process */
-    if (j > 0) {
-        init_process(curr_process, prev_process); /* Initialize the values */
-        char **p_argv_perm = malloc(sizeof(char *) * (j + 1));
-        p_argv_perm[j] = NULL;
-        for (int k = 0; k < j; k++) {
-            p_argv_perm[k] = tokens[k];
-        }
-        curr_process->argv = p_argv_perm;
+        p->argv[j] = malloc((strlen(tokens[i]) + 1));
+        strcpy(p->argv[j], tokens[i]);
+        i++;
+        j++;
+    } while (i < token_count);
+    if (!ended_on_symbol) {
+        p->argv = realloc(p->argv, sizeof(char *) * (j + 1));
+        p->argv[j] = NULL;
     }
+    if (local_head == NULL)
+        local_head = p;
 
-    execute_command(head);
+    launch_processes(local_head);
 }
 
 int main(int argc, char **argv, char **envp) {
-    printf("%d", getpid());
+    printf("%d\n", getpid());
     char input_line[INPUT_LENGTH];
     char *tokens[MAX_TOKENS];
     int token_count;
 
     init_shell();
+    memset(background_process_buffer, 0, INPUT_LENGTH);
 
     while (1) {
         /* Zero out memory to be safe */
         memset(input_line, 0, INPUT_LENGTH);
         memset(tokens, 0, MAX_TOKENS * sizeof(char *));
+        if (background_process_buffer[0] != '\0') {
+            printf("%s", background_process_buffer);
+            memset(background_process_buffer, 0, INPUT_LENGTH);
+        }
         /* Print the prompt string */
         printf("%s", get_prompt_string(NULL));
         fflush(NULL); /* Flush since we didn't print a newline */
 
-        read(STDIN_FILENO, input_line, INPUT_LENGTH);
+        /* Sig child may interrupt read */
+        do {
+            read(STDIN_FILENO, input_line, INPUT_LENGTH);
+        } while (errno == EINTR);
 
         tokens[0] = strtok(input_line, " \t\n");
         if (tokens[0] == NULL) {
@@ -242,12 +285,11 @@ int main(int argc, char **argv, char **envp) {
             continue;
         }
         token_count = 1;
-        while (token_count < MAX_TOKENS - 1 &&
+        while (token_count < MAX_TOKENS &&
                 (tokens[token_count] = strtok(NULL, " \t\n")) != NULL)
             token_count++;
 
-        /* Execute the command */
-        handle_command(token_count, tokens);
+        handle_input(tokens, token_count);
     }
 
     return 0;

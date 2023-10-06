@@ -2,7 +2,6 @@
 #define _JOB_H
 
 #include <unistd.h>
-#include <termios.h>
 
 /* A process is a single process. */
 typedef struct process {
@@ -12,41 +11,24 @@ typedef struct process {
   char completed;             /* true if process has completed */
   char stopped;               /* true if process has stopped */
   int status;                 /* reported status value */
+  char foreground;            /* Is process in foreground */
 } process;
 
-process *init_process(process *p, process *next);
+/* Init process to default state */
+process *init_process(process *p);
 
-/* A job is a pipeline of processes.  */
-typedef struct job {
-  struct job *next;           /* next active job */
-  char *command;              /* command line, used for messages */
-  process *first_process;     /* list of processes in this job */
-  pid_t pgid;                 /* process group ID */
-  char notified;              /* true if user told about stopped job */
-  struct termios tmodes;      /* saved terminal modes */
-  int stdin, stdout, stderr;  /* standard i/o channels */
-} job;
+/* Add a process to the linked list of processes. */
+process *add_process(process **head, process *p);
 
-/* Find the active job with the process group id
- * matching the given pgid.
- * @param head: The head of the job linked list.
- * @param pgid: The process group id to match.
- * @return: Pointer to job with matching pgid, or NULL if no match.
+/* Remove the process from the list of processes. */
+process *remove_process(process **head, pid_t pid);
+
+/* Find the process with the indicated pid. */
+process *find_process(process *head, pid_t pid);
+
+/* Free the memory associated with a process.
+ * But not the pointer to the process itself
  */
-job *job_find(job *head, pid_t pgid);
-
-/* Checks if a job is stopped.
- * @param j: The job to check.
- * @return: 1 if all processes in the job are stopped or completed
- * 0 otherwise.
- */
-int job_is_stopped(job *j);
-
-/* Checks if a job is completed.
- * @param j: The job to check.
- * @return: 1 if all processes in the job are completed
- * 0 otherwise.
- */
-int job_is_completed(job *j);
+void free_process(process *p);
 
 #endif /* _JOB_H */

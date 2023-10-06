@@ -1,33 +1,62 @@
 #include "../include/job.h"
 #include <stdlib.h>
 
-process *init_process(process *p, process *next) {
+/* Init process to default state */
+process *init_process(process *p) {
     p->argv = NULL;
-    p->next = next;
+    p->next = NULL;
     p->completed = 0;
     p->stopped = 0;
     p->status = 0;
+    p->foreground = 1;
     return p;
 }
 
-job *job_find(job *head, pid_t pgid) {
-    for (job *j = head; j; j = j->next)
-        if (j->pgid == pgid)
-            return j;
-    return NULL;    
+/* Add a process to the linked list of processes. */
+process *add_process(process **head, process *p) {
+    if (*head == NULL) {
+        *head = p;
+        return p;
+    }
+    process *q;
+    for (q = *head; q->next; q = q->next)
+        ;
+    q->next = p;
+    return p;
 }
 
-int job_is_stopped(job *j) {
-    for (process *p = j->first_process; p; p = p->next)
-        /* If there is a single process that is still running, then the job is not done */
-        if (!p->completed && !p->stopped)
-            return 0;
-    return 1;
+/* Remove the process from the list of processes. */
+process *remove_process(process **head, pid_t pid) {
+    process *p, *prev = NULL;
+    for (p = *head; p; p = p->next) {
+        if (p->pid == pid) {
+            if (prev)
+                prev->next = p->next;
+            else
+                *head = p->next;
+            return p;
+        }
+        prev = p;
+    }
+    return NULL;
 }
-int job_is_completed(job *j) {
-    for (process *p = j->first_process; p; p = p->next)
-        /* If there is a single process that has not completed, then the job is not done */
-        if (!p->completed)
-            return 0;
-    return 1;
+
+/* Find the process with the indicated pid. */
+process *find_process(process *head, pid_t pid) {
+    process *p;
+    for (p = head; p; p = p->next)
+        if (p->pid == pid)
+            return p;
+    return NULL;
+}
+
+/* Free the memory associated with a process.
+ * But not the pointer to the process itself
+ */
+void free_process(process *p) {
+    if (p->argv == NULL)
+        return;
+    for (int i = 0; p->argv[i] != NULL; i++)
+        free(p->argv[i]);
+    free(p->argv);
 }

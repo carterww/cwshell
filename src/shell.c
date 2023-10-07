@@ -1,4 +1,5 @@
 #include <asm-generic/errno-base.h>
+#include <bits/types/struct_timeval.h>
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
@@ -17,53 +18,12 @@
 #define MAX_TOKENS 100
 #define MAX_COMMAND_COUNT 100
 
-pid_t shell_pgid;
-struct termios shell_tmodes;
-int shell_terminal;
-int shell_is_interactive;
-
-char background_process_buffer[INPUT_LENGTH];
+static pid_t shell_pgid;
+static struct termios shell_tmodes;
+static int shell_terminal;
+static int shell_is_interactive;
 
 static process *head = NULL;
-
-void sigchld_hanlder(int n) {
-    if (head == NULL)
-        return;
-    process *p = head, *tmp = NULL;
-    while (p) {
-        if (p->foreground) {
-            p = p->next;
-            continue;
-        }
-        pid_t wait_result = waitpid(p->pid, &(p->status), WNOHANG);
-        if (wait_result == 0) {
-            p = p->next;
-            continue;
-        } else if (wait_result == -1) {
-            perror("waitpid");
-            exit(1);
-        } else {
-            tmp = p;
-            char msg[64];
-            if (WIFEXITED(p->status)) {
-                sprintf(msg, "%s exited with status %d\n", p->argv[0], WEXITSTATUS(p->status));
-            } else {
-                sprintf(msg, "%s exited abnormally\n", p->argv[0]);
-            }
-            /* If we don't have the terminal then don't print to it
-             * simply add it to the buffer.
-             */
-            size_t left = INPUT_LENGTH - strlen(background_process_buffer) - 1;
-            strncat(background_process_buffer, msg, left);
-            p = p->next;
-            /* Free completed process */
-            remove_process(&head, tmp->pid);
-            free_process(tmp);
-            free(tmp);
-            tmp = NULL;
-        }
-    }
-}
 
 /* Initializes the shell by ensuring the shell is the
  * foreground process group of terminal. If so, it puts shell
@@ -93,8 +53,7 @@ void init_shell() {
         signal(SIGTSTP, SIG_IGN);
         signal(SIGTTIN, SIG_IGN);
         signal(SIGTTOU, SIG_IGN);
-        /* So we get notified when a child process exits */
-        signal(SIGCHLD, sigchld_hanlder);
+        signal(SIGCHLD, SIG_IGN);
 
         /* Put shell in its own process group. */
         shell_pgid = getpid();
@@ -109,6 +68,11 @@ void init_shell() {
 
         /* Save default terminal attributes for shell.  */
         tcgetattr(shell_terminal, &shell_tmodes);
+        /* I want to be able to manage the background process
+         * use of stdout, so I need to set this flag.
+         */
+        shell_tmodes.c_lflag |= TOSTOP;
+        tcsetattr(shell_terminal, TCSADRAIN, &shell_tmodes);
     }
 }
 
@@ -253,32 +217,117 @@ void handle_input(char **tokens, int token_count) {
     launch_processes(local_head);
 }
 
+int mark_process(process *p) {
+    pid_t wait_result = waitpid(p->pid, &(p->status), WNOHANG);
+    if (wait_result == 0) {
+        return 0;
+    } else if (wait_result == -1) {
+        perror("waitpid");
+        exit(1);
+    } else {
+        if (WIFEXITED(p->status)) {
+            p->completed = 1;
+            return 1;
+        } else if (WIFSTOPPED(p->status)) {
+            p->stopped = 1;
+            printf("Stopped process %d\n", p->pid);
+            if (WSTOPSIG(p->status) == SIGTTOU) {
+                return 3;
+            }
+            return 2;
+        } else if (WIFCONTINUED(p->status)) {
+            p->stopped = 0;
+            return 0;
+        } else {
+            p->completed = 1;
+            return -1;
+        }
+    }
+}
+
+int check_background_processes() {
+    int should_print = 0;
+    if (head == NULL)
+        return should_print;
+    process *p = head, *tmp = NULL;
+    while (p) {
+        int process_state = mark_process(p);
+        if (process_state != 0 && should_print == 0) {
+            printf("\n");
+            should_print = 1;
+        }
+        if (process_state == 0) {
+            p = p->next;
+            continue;
+        } else if (process_state < 0) {
+            printf("%s [%d] exited abnormally\n", p->argv[0], p->pid);
+        } else if (process_state == 1) {
+            printf("%s [%d] exited with status %d\n", p->argv[0], p->pid, WEXITSTATUS(p->status));
+        } else if (process_state == 2) {
+            printf("%s [%d] suspended. Send SIGCONT to continue job\n", p->argv[0], p->pid);
+        } else if (process_state == 3) {
+            printf("%s [%d] suspended (tty output). Continuing job\n", p->argv[0], p->pid);
+            kill(p->pid, SIGCONT);
+            p->stopped = 0;
+        }
+        if (p->completed)
+            tmp = p;
+        p = p->next;
+        if (tmp != NULL) {
+            free_process(tmp);
+            free(tmp);
+            tmp = NULL;
+        }
+    }
+    return should_print; 
+}
+
 int main(int argc, char **argv, char **envp) {
     printf("%d\n", getpid());
     char input_line[INPUT_LENGTH];
     char *tokens[MAX_TOKENS];
     int token_count;
+    struct timeval timeout;
+    fd_set readfds;
 
     init_shell();
-    memset(background_process_buffer, 0, INPUT_LENGTH);
 
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 30000; /* 30 ms */
     while (1) {
         /* Zero out memory to be safe */
         memset(input_line, 0, INPUT_LENGTH);
         memset(tokens, 0, MAX_TOKENS * sizeof(char *));
-        if (background_process_buffer[0] != '\0') {
-            printf("%s", background_process_buffer);
-            memset(background_process_buffer, 0, INPUT_LENGTH);
-        }
-        /* Print the prompt string */
         printf("%s", get_prompt_string(NULL));
         fflush(NULL); /* Flush since we didn't print a newline */
+        int n;
 
-        /* Sig child may interrupt read */
-        do {
-            read(STDIN_FILENO, input_line, INPUT_LENGTH);
-        } while (errno == EINTR);
-
+        /* Wait for input */
+        while (1) {
+            FD_ZERO(&readfds);
+            FD_SET(STDIN_FILENO, &readfds);
+            n = select(1, &readfds, NULL, NULL, &timeout);
+            switch (n) {
+                case -1:
+                    perror("select");
+                    exit(1);
+                case 0:
+                    /* Timeout check background processes */
+                    if (check_background_processes() != 0)
+                        printf("%s", get_prompt_string(NULL));
+                    fflush(NULL);
+                    break;
+                default:
+                    do {
+                        errno = 0;
+                        if (read(STDIN_FILENO, input_line, INPUT_LENGTH) >= 0) {
+                            goto input_found;
+                        } 
+                    } while (errno == EINTR);
+                    break;
+            }
+        }
+input_found:
         tokens[0] = strtok(input_line, " \t\n");
         if (tokens[0] == NULL) {
             /* No input */

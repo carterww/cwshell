@@ -1,10 +1,11 @@
 #ifndef _IO_H
 #define _IO_H
 
-#define PROMPT_STRING "shell> "
+#define PROMPT_STRING "sh> "
 
 /* Don't want anything in here for now, but
- * could add some stuff later.
+ * could add some stuff later like username,
+ * hostname, etc.
  */
 typedef struct {
     

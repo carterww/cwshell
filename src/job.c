@@ -1,4 +1,5 @@
 #include "../include/job.h"
+#include <stdio.h>
 #include <stdlib.h>
 
 /* Init process to default state */
@@ -30,8 +31,9 @@ process *remove_process(process **head, pid_t pid) {
     process *p, *prev = NULL;
     for (p = *head; p; p = p->next) {
         if (p->pid == pid) {
-            if (prev)
+            if (prev) {
                 prev->next = p->next;
+            }
             else
                 *head = p->next;
             return p;

@@ -1,5 +1,3 @@
-#include <asm-generic/errno-base.h>
-#include <bits/types/struct_timeval.h>
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
@@ -13,16 +11,19 @@
 
 #include "../include/job.h"
 #include "../include/io.h"
+#include "../include/history.h"
 
+/* Constants for input */
 #define INPUT_LENGTH 1024
 #define MAX_TOKENS 100
-#define MAX_COMMAND_COUNT 100
+#define MAX_COMMAND_COUNT 10
 
 static pid_t shell_pgid;
 static struct termios shell_tmodes;
-static int shell_terminal;
+static int shell_terminal; /* File descriptor for the terminal */
 static int shell_is_interactive;
 
+/* Head of process linked list */
 static process *head = NULL;
 
 /* Initializes the shell by ensuring the shell is the
@@ -48,12 +49,12 @@ void init_shell() {
             kill(shell_pgid, SIGTTIN); 
         }
         /* Ignore interactive and job-control signals. */
-        //signal(SIGINT, SIG_IGN); /* Later change this to show history */
+        signal(SIGINT, print_history); /* Later change this to show history */
         signal(SIGQUIT, SIG_IGN);
         signal(SIGTSTP, SIG_IGN);
         signal(SIGTTIN, SIG_IGN);
         signal(SIGTTOU, SIG_IGN);
-        signal(SIGCHLD, SIG_IGN);
+        //signal(SIGCHLD, SIG_IGN);
 
         /* Put shell in its own process group. */
         shell_pgid = getpid();
@@ -68,14 +69,12 @@ void init_shell() {
 
         /* Save default terminal attributes for shell.  */
         tcgetattr(shell_terminal, &shell_tmodes);
-        /* I want to be able to manage the background process
-         * use of stdout, so I need to set this flag.
-         */
-        shell_tmodes.c_lflag |= TOSTOP;
-        tcsetattr(shell_terminal, TCSADRAIN, &shell_tmodes);
     }
 }
 
+/* Executes the process by replacing the current process
+ * with the process to be executed. Child calls this function.
+ */
 void execute_process(process *p) {
     pid_t pid;
 
@@ -105,12 +104,17 @@ void execute_process(process *p) {
     exit(1);
 }
 
-void launch_processes(process *local_head) {
-    if (local_head == NULL)
+/* Launches the processes in the list of processes, adds background
+ * processes to the global linked list
+ */
+void launch_processes(process **processes, int process_count) {
+    if (process_count == 0)
         return;
-    process *p = local_head, *tmp = NULL;
-    while (p) {
+    process *p = processes[0], *prev = NULL;
+    int i = 0;
+    while (i < process_count && p) {
         pid_t pid;
+        /* Create a new process */
         pid = fork();
         if (pid < 0) {
             perror("fork");
@@ -128,41 +132,44 @@ void launch_processes(process *local_head) {
                 tcsetpgrp(shell_terminal, shell_pgid);
                 /* Set these in case process adjusted them */
                 tcsetattr(shell_terminal, TCSANOW, &shell_tmodes);
+
+                /* Retrive the exit status of the process */
+                WIFEXITED(p->status) ? 
+                    printf("%s exited with status %d\n", p->argv[0], WEXITSTATUS(p->status)) : 
+                    printf("%s exited abnormally\n", p->argv[0]);
+                free_process(p);
+                free(p);
+                return;
             } else {
+                /* Print pid of background process */
                 printf("%s [%d]\n", p->argv[0], pid);
                 /* Add the process to the list of processes */
-                if (head != NULL) {
-                    add_process(&head, p);
-                } else {
-                    head = p;
-                }
+                prev = p;
+                p = processes[++i];
+                add_process(&head, prev);
             }
         } else {
             /* Child */
             execute_process(p);
         }
-        if (p->completed) {
-            tmp = p;
-            WIFEXITED(p->status) ? 
-                printf("%s exited with status %d\n", p->argv[0], WEXITSTATUS(p->status)) : 
-                printf("%s exited abnormally\n", p->argv[0]);
-        }
-        p = p->next;
-        /* Free completed process */
-        if (tmp != NULL) {
-            free_process(tmp);
-            free(tmp);
-            tmp = NULL;
-        }
     }
 }
 
+/* Parses command into processes and launches them */
 void handle_input(char **tokens, int token_count) {
-    process *local_head = NULL;
+    int process_count = 0;
+    process *processes[MAX_COMMAND_COUNT];
+
+    /* Initialize first process */
     process *p = malloc(sizeof(process));
     init_process(p);
     p->argv = malloc(sizeof(char *) * (token_count + 1));
 
+    /* If we end parse on symbol, we need to add last
+     * process to the list of processes. We use this
+     * variable to keep track of that and to handle
+     * checking for next process in the loop.
+     */
     char ended_on_symbol = 0;
     int i = 0, j = 0;
     do {
@@ -174,21 +181,16 @@ void handle_input(char **tokens, int token_count) {
             *p->argv = realloc(*p->argv, sizeof(char *) * (j + 1));
             p->argv[j] = NULL;
             p->foreground = 0;
+
+            /* Second bit indicates that we need to check
+             * for next process in the loop.
+             */
             ended_on_symbol |= 2;
-        } else if (strcmp(";", tokens[i]) == 0) {
-            /* Move all this to function since same as above */
-            *p->argv = realloc(*p->argv, sizeof(char *) * (j + 1));
-            p->argv[j] = NULL;
-            ended_on_symbol |= 2;
-        }
+        }   
 
         if (ended_on_symbol & 2) {
             ended_on_symbol = 0;
-            if (local_head != NULL) {
-                add_process(&local_head, p);
-            } else {
-                local_head = p;
-            }       
+            processes[process_count++] = p;
             if (i + 1 < token_count) {
                 p = malloc(sizeof(process));
                 init_process(p);
@@ -207,16 +209,21 @@ void handle_input(char **tokens, int token_count) {
         i++;
         j++;
     } while (i < token_count);
+
+    /* If we didn't end on a symbol, we need to add the last process */
     if (!ended_on_symbol) {
         p->argv = realloc(p->argv, sizeof(char *) * (j + 1));
         p->argv[j] = NULL;
+        processes[process_count++] = p;
     }
-    if (local_head == NULL)
-        local_head = p;
 
-    launch_processes(local_head);
+    launch_processes(processes, process_count);
 }
 
+/* Mark the process as completed or stopped and return
+ * 1 if completed, 2 if stopped, 0 if neither, -1 if abnormal
+ * termination.
+ */
 int mark_process(process *p) {
     pid_t wait_result = waitpid(p->pid, &(p->status), WNOHANG);
     if (wait_result == 0) {
@@ -230,10 +237,6 @@ int mark_process(process *p) {
             return 1;
         } else if (WIFSTOPPED(p->status)) {
             p->stopped = 1;
-            printf("Stopped process %d\n", p->pid);
-            if (WSTOPSIG(p->status) == SIGTTOU) {
-                return 3;
-            }
             return 2;
         } else if (WIFCONTINUED(p->status)) {
             p->stopped = 0;
@@ -245,8 +248,14 @@ int mark_process(process *p) {
     }
 }
 
+/* Check the status of background processes and print
+ * their status if they have completed. This strategy
+ * used over SIGCHLD handling because it avoids cases
+ * where we would remove a process from the list of
+ * while we are iterating over it.
+ */
 int check_background_processes() {
-    int should_print = 0;
+    int should_print = 0; /* Used to determine if we should print prompt again */
     if (head == NULL)
         return should_print;
     process *p = head, *tmp = NULL;
@@ -265,13 +274,11 @@ int check_background_processes() {
             printf("%s [%d] exited with status %d\n", p->argv[0], p->pid, WEXITSTATUS(p->status));
         } else if (process_state == 2) {
             printf("%s [%d] suspended. Send SIGCONT to continue job\n", p->argv[0], p->pid);
-        } else if (process_state == 3) {
-            printf("%s [%d] suspended (tty output). Continuing job\n", p->argv[0], p->pid);
-            kill(p->pid, SIGCONT);
-            p->stopped = 0;
         }
-        if (p->completed)
+        if (p->completed) {
             tmp = p;
+            remove_process(&head, p->pid);
+        }
         p = p->next;
         if (tmp != NULL) {
             free_process(tmp);
@@ -282,18 +289,19 @@ int check_background_processes() {
     return should_print; 
 }
 
+/* Main loop of the shell */
 int main(int argc, char **argv, char **envp) {
-    printf("%d\n", getpid());
     char input_line[INPUT_LENGTH];
     char *tokens[MAX_TOKENS];
     int token_count;
     struct timeval timeout;
     fd_set readfds;
 
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 50000; /* 50 ms */
     init_shell();
 
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 30000; /* 30 ms */
+    /* Main shell loop */
     while (1) {
         /* Zero out memory to be safe */
         memset(input_line, 0, INPUT_LENGTH);
@@ -306,38 +314,84 @@ int main(int argc, char **argv, char **envp) {
         while (1) {
             FD_ZERO(&readfds);
             FD_SET(STDIN_FILENO, &readfds);
+            /* Probably could have used aio_read() here, but
+             * I am more familiar with select().
+             * This allows us to check for background processes
+             * every 50 ms while waiting for input. May not be most
+             * efficient, but it is simple and avoids cases where
+             * signal handling messes with process linked list state
+             * while modifying/reading it.
+             */
             n = select(1, &readfds, NULL, NULL, &timeout);
-            switch (n) {
-                case -1:
-                    perror("select");
-                    exit(1);
-                case 0:
-                    /* Timeout check background processes */
-                    if (check_background_processes() != 0)
-                        printf("%s", get_prompt_string(NULL));
-                    fflush(NULL);
-                    break;
-                default:
-                    do {
-                        errno = 0;
-                        if (read(STDIN_FILENO, input_line, INPUT_LENGTH) >= 0) {
-                            goto input_found;
-                        } 
-                    } while (errno == EINTR);
-                    break;
+            if (n == -1) {
+                if (errno == EINTR) { /* Interrupted by signal */
+                    errno = 0;
+                    continue;
+                }
+                perror("select");
+                exit(1);
+            } else if (n == 0) {
+                if (check_background_processes() != 0)
+                    printf("%s", get_prompt_string(NULL));
+                fflush(NULL);
+                continue;
             }
+            do {
+                errno = 0;
+                if (read(STDIN_FILENO, input_line, INPUT_LENGTH) >= 0) {
+                    goto input_found;
+                } 
+            } while (errno == EINTR); /* Interrupted by signal, restart read */
         }
 input_found:
+        add_to_history(input_line); /* If this is r x, it will be overwritten */
         tokens[0] = strtok(input_line, " \t\n");
         if (tokens[0] == NULL) {
             /* No input */
             continue;
         }
+        if (strcmp(tokens[0], "exit") == 0) {
+            /* Exit the shell */
+            exit(0);
+        } else if (strcmp(tokens[0], "r") == 0) {
+            /* Fetch a command from the history */
+            char *cmd = fetch_command(tokens[0], tokens[1]);
+            if (cmd == NULL) {
+                printf("Error retrieving command.\n");
+                continue;
+            }
+            memset(input_line, 0, INPUT_LENGTH);
+            strcpy(input_line, cmd);
+            goto input_found; /* Execute fetched command */
+        }
         token_count = 1;
         while (token_count < MAX_TOKENS &&
-                (tokens[token_count] = strtok(NULL, " \t\n")) != NULL)
+                (tokens[token_count] = strtok(NULL, " \t\n")) != NULL) {
+            if (tokens[token_count][0] == '\"') {
+                /* Handle quoted strings */
+                int start_len = strlen(tokens[token_count]);
+                char *tmp = strtok(NULL, "\"");
+                if (tmp == NULL) {
+                    /* One word in quotes */
+                    if (tokens[token_count][start_len - 1] == '\"') {
+                        tokens[token_count]++;
+                        tokens[token_count][start_len - 1] = '\0';
+                        printf("token: %s\n", tokens[token_count]);
+                        token_count++;
+                        continue;
+                    }
+                    /* No closing quote */
+                    printf("Error parsing input.\n");
+                    break;
+                }
+                /* Multiple words in quotes */
+                tokens[token_count]++;
+                tokens[token_count][start_len - 1] = ' ';
+            }
             token_count++;
+        }
 
+        /* Parse and execute the command */
         handle_input(tokens, token_count);
     }
 

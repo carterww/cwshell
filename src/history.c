@@ -1,8 +1,22 @@
-#include "../include/history.h"
-#include "../include/io.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "io.h"
+#include "history.h"
+
+/* Index of the next command to be inserted
+ * into the history array. Needs to be modded
+ * by MAX_HISTORY to keep it in the range.
+ */
+static size_t next_command_index = 0;
+
+/* Array of pointers to history_info structs.
+ * This is a circular array, so we need to
+ * keep track of the next index to insert
+ * a command into.
+ */
+static history_info *history[MAX_HISTORY];
+
 
 /* Used to make printing history look nice */
 static int get_digit_count(size_t num) {
@@ -32,7 +46,7 @@ void add_to_history(char *command) {
 /* Print the history */
 void print_history(int status) {
     printf("\nCommand History:\n");
-    int i, offset;
+    int i;
     if (next_command_index < MAX_HISTORY) {
         i = 0;
     } else {

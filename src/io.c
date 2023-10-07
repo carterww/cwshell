@@ -1,4 +1,4 @@
-#include "../include/io.h"
+#include "io.h"
 
 /* Wrapped in function in case I want to change it later
  * to something more complex

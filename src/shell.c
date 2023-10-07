@@ -9,9 +9,9 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
-#include "../include/job.h"
-#include "../include/io.h"
-#include "../include/history.h"
+#include "job.h"
+#include "io.h"
+#include "history.h"
 
 /* Constants for input */
 #define INPUT_LENGTH 1024
@@ -374,9 +374,8 @@ input_found:
                 if (tmp == NULL) {
                     /* One word in quotes */
                     if (tokens[token_count][start_len - 1] == '\"') {
-                        tokens[token_count]++;
                         tokens[token_count][start_len - 1] = '\0';
-                        printf("token: %s\n", tokens[token_count]);
+                        tokens[token_count]++;
                         token_count++;
                         continue;
                     }

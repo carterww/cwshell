@@ -7,6 +7,9 @@ OBJS=$(obj/shell.o obj/history.o obj/io.o obj/job.o)
 default: obj obj/shell.o obj/history.o obj/io.o obj/job.o
 	$(CC) -o $(EXENAME) obj/shell.o obj/history.o obj/io.o obj/job.o $(CFLAGS)
 
+perf: CFLAGS+=-O2
+perf: default
+
 obj/%.o: src/%.c
 	$(CC) -c $< -o $@ $(CFLAGS)
 

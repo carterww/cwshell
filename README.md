@@ -23,4 +23,23 @@ The augmentation requires the shell to have a command history feature. This feat
 [13]  ls
 [14]  kill -9 10130
 ... And so on
-Running "r" will execute the last command (not printed in example) and "r 14" would run "kill -9 10130." The "r" or "r x" command will not be entered into the history, rather, its command will be.
+Running "r" will execute the last command (not printed in example) and "r 14" would run "kill -9 10130." The "r" or "r x" command will not be entered into the history, rather, its command will be. This feature does not meet the requirements for the augmentation yet, so I will email you the new source code once it does.
+
+## Compiling
+There is a Makefile you can use to compile the shell. Simply run "make" or "make perf" to create a executable named "shell." "make perf" simply adds the -O2 flag to the compiler. You can edit the Makefile to add new flags, change the executable name, change the compiler, etc.
+
+## Layout
+Header files are contained in the include directory and source code files are contained in the src directory.
+
+### Header Files
+1. io.h
+    - I was going to expand this further, but for now it is just responsible for getting the prompt string. Once I update the shell to have more job control features, this will likely have more declarations.
+2. job.h
+    - Contains all the declarations for structs and functions dealing with jobs (in this case a job can only be a single process).
+3. history.h
+    - Contains all the declarations for structs and functions dealing with the command history feature. As stated previously, this is not completed.
+
+### Source Files
+Each header file has an associated source file that just contains the definitons for the functions. I will not discuss them here.
+1. shell.c
+    - Contains the main function and other core functionality like parsing, forking, executing, waiting, etc. This file is commented up so I recommend just reading through those.

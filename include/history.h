@@ -8,7 +8,6 @@
  * to a command in the history.
  */
 typedef struct {
-    pid_t *pid_head;
     char *command;
     size_t command_index;
 } history_info;
@@ -22,7 +21,7 @@ void add_to_history(char *command);
 void print_history(int status);
 
 /* Get the command at the given index. */
-char *fetch_command(char *token1, char *token2);
+char *fetch_command(char *tokens[], int token_count);
 
 /* Free the history. */
 void free_history(history_info *hinfo);

@@ -355,7 +355,12 @@ input_found:
             exit(0);
         } else if (strcmp(tokens[0], "r") == 0) {
             /* Fetch a command from the history */
-            char *cmd = fetch_command(tokens[0], tokens[1]);
+            token_count = 1;
+            while(token_count < MAX_TOKENS &&
+                    (tokens[token_count] = strtok(NULL, " \t\n")) != NULL) {
+                token_count++;
+            }
+            char *cmd = fetch_command(tokens, token_count);
             if (cmd == NULL) {
                 printf("Error retrieving command.\n");
                 continue;

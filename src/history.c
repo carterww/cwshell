@@ -28,6 +28,8 @@ static int get_digit_count(size_t num) {
     return count;
 }
 
+static int get_command_index(char *tokens[], int token_count);
+
 /* Add a command to the history */
 void add_to_history(char *command) {
     size_t insert_index = next_command_index % MAX_HISTORY;
@@ -69,21 +71,29 @@ void print_history(int status) {
 }
 
 /* Fetch a command from the history */
-char *fetch_command(char *token1, char *token2) {
-    token2 = strtok(NULL, " \t\n");
-    /* If there are other arguments, ignore them */
-    while (strtok(NULL, " \t\n") != NULL)
-        ;
-    int command_index;
-    if (token2 == NULL) {
-        /* grab most recent command, -1 here because we already entered
+char *fetch_command(char *tokens[], int token_count) {
+    int command_index = -1;
+    if (token_count < 2) {
+        /* grab most recent command, -2 here because we already entered
          * r x into history
          */
-        command_index = next_command_index - 1;
+        command_index = next_command_index - 2;
     } else {
-        command_index = atoi(token2);
+        command_index = get_command_index(tokens, token_count);
+        if (command_index == -1) {
+            /* no match found */
+            fprintf(stderr, "No match found for ");
+            for (int i = 1; i < token_count; i++) {
+                fprintf(stderr, "%s ", tokens[i]);
+            }
+            fprintf(stderr, "\n");
+            next_command_index--; /* overwrite r x in history */
+            free_history(history[next_command_index % MAX_HISTORY]);
+            history[next_command_index % MAX_HISTORY] = NULL;
+            return NULL;
+        }
     }
-    command_index = (command_index - 1) % MAX_HISTORY;
+    command_index = command_index % MAX_HISTORY;
     next_command_index--; /* overwrite r x in history */
     return history[command_index]->command;
 }
@@ -94,4 +104,44 @@ void free_history(history_info *hinfo) {
         free(hinfo->command);
     }
     free(hinfo);
+}
+
+static int get_command_index(char *tokens[], int token_count) {
+    int command_index = -1;
+    int total_token_len = 0;
+    fprintf(stderr, "token_count: %d\n", token_count);
+    for (int i = 1; i < token_count; i++) {
+        fprintf(stderr, "token: %s\n", tokens[i]);
+        total_token_len += strlen(tokens[i]) + 1;
+    }
+    int start = next_command_index % MAX_HISTORY;
+    for (int i = 0; i < MAX_HISTORY; i++) {
+        int index = (start + i) % MAX_HISTORY;
+        if (history[index] == NULL) continue;
+        if (history[index]->command == NULL) continue;
+
+        int command_len = strlen(history[index]->command);
+        if (command_len < total_token_len) continue;
+        /* Compare strings */
+        int cascade_len = 0;
+        for (int j = 1; j < token_count; j++) {
+            int token_len = strlen(tokens[j]);
+            for (int k = 0; k < token_len; k++) {
+                if (tokens[j][k] == '\0')
+                    goto getout;
+                if (history[index]->command[k + cascade_len] != tokens[j][k])
+                    goto getout;
+                if (k == strlen(tokens[j]) - 1 && history[index]->command[k + cascade_len] == tokens[j][k]) {
+                    /* found a match */
+                    if (j == token_count - 1) command_index = history[index]->command_index;
+                    break;
+                }
+            }
+            cascade_len += token_len + 1;
+        }
+getout:
+        if (command_index != -1) break;
+    }
+    fprintf(stderr, "command_index: %d\n", command_index);
+    return command_index;
 }
